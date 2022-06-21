@@ -22,7 +22,8 @@ impl fmt::Display for Error {
 
 use Error::*;
 
-/// Fast fixed size hex string conversion. This is from `u64_array_bigints` but with fixed size and no reversal except at nibble level
+/// Fast fixed size hex string conversion. This is from `u64_array_bigints` but
+/// with fixed size and no reversal except at nibble level
 fn from_hex_str_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<[u64; N], Error> {
     // Using SWAR techniques to process 8 hex chars at a time.
     let swar = |x: u64| -> Result<u32, Error> {
@@ -33,19 +34,19 @@ fn from_hex_str_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<[u64
         // get the msb out of the way so that later carries cannot propogate between
         // byte boundaries
         if (x & MSBS) != 0 {
-            return Err(InvalidChar);
+            return Err(InvalidChar)
         }
         // add -(b'f' + 1)u7 (ASCII z no 8th bit)
         let gt_f = x.wrapping_add(0x1919_1919_1919_1919) & MSBS;
         if gt_f != 0 {
             // overflow in at least one of the bytes, there was a char above b'f'
-            return Err(InvalidChar);
+            return Err(InvalidChar)
         }
         // add -b'0'u7
         let ge_0 = x.wrapping_add(0x5050_5050_5050_5050) & MSBS;
         let lt_0 = ge_0 ^ MSBS;
         if lt_0 != 0 {
-            return Err(InvalidChar);
+            return Err(InvalidChar)
         }
 
         // now all bytes are in the range b'0'..=b'f', but need to remove two more
@@ -57,7 +58,7 @@ fn from_hex_str_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<[u64
         // add -(b'9' + 1)u7
         let ge_9 = x.wrapping_add(0x4646_4646_4646_4646) & MSBS;
         if (ge_9 & lt_a) != 0 {
-            return Err(InvalidChar);
+            return Err(InvalidChar)
         }
 
         let ge_9_mask = (ge_9 >> 7).wrapping_mul(0xff);
@@ -86,10 +87,10 @@ fn from_hex_str_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<[u64
 
     // avoid overflow possibility
     if ((N2 >> 1) != N) || ((N2 & 1) != 0) {
-        return Err(InvalidConsts);
+        return Err(InvalidConsts)
     }
     if ((src.len() >> 3) != N2) || ((src.len() & 0b111) != 0) {
-        return Err(InvalidLen);
+        return Err(InvalidLen)
     }
     // if `src` has zero bytes they will overwrite and cause overflow errors in
     // `swar`
@@ -109,7 +110,8 @@ fn from_hex_str_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<[u64
     Ok(res)
 }
 
-/// Also from `u64_array_bigints`, fixed size and no reversal except at nibble level. Errors can only occur if `N*2 != N2` or `src.len()*8 != NN`.
+/// Also from `u64_array_bigints`, fixed size and no reversal except at nibble
+/// level. Errors can only occur if `N*2 != N2` or `src.len()*8 != NN`.
 fn to_hex_string_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<String, Error> {
     let swar = |x: u64| -> u64 {
         // Using SWAR techniques to process one u32 at a time.
@@ -142,10 +144,10 @@ fn to_hex_string_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<Str
     };
 
     if ((N2 >> 1) != N) || ((N2 & 1) != 0) {
-        return Err(InvalidConsts);
+        return Err(InvalidConsts)
     }
     if ((src.len() >> 3) != N) || ((src.len() & 0b111) != 0) {
-        return Err(InvalidLen);
+        return Err(InvalidLen)
     }
     let mut buf = [0u64; N];
     let bytes_buf: &mut [u8] = bytemuck::try_cast_slice_mut(&mut buf).unwrap();
@@ -161,7 +163,8 @@ fn to_hex_string_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<Str
         buf2[(i << 1) + 1] = u64::from_le(swar(hi));
     }
     let v: &[u8] = bytemuck::try_cast_slice(&buf2).unwrap();
-    // TODO it might be possible to allocate as Vec<u64> and then raw_parts cast to Vec<u8>?
+    // TODO it might be possible to allocate as Vec<u64> and then raw_parts cast to
+    // Vec<u8>?
     let mut s = vec![0u8; N2 * 8];
     s.copy_from_slice(v);
     #[cfg(all(debug_assertions, not(miri)))]
@@ -218,12 +221,13 @@ impl<'de> Deserialize<'de> for Signature {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use old_rand_core::{CryptoRng as OldCryptoRng, RngCore as OldRngCore};
     use rand_xoshiro::{
         rand_core::{RngCore, SeedableRng},
         Xoshiro128StarStar,
     };
+
+    use super::*;
 
     /// Use only for deterministic testing not for production
     struct TestRng(Xoshiro128StarStar);
@@ -232,12 +236,15 @@ mod test {
         fn next_u32(&mut self) -> u32 {
             RngCore::next_u32(&mut self.0)
         }
+
         fn next_u64(&mut self) -> u64 {
             RngCore::next_u64(&mut self.0)
         }
+
         fn fill_bytes(&mut self, dest: &mut [u8]) {
             RngCore::fill_bytes(&mut self.0, dest)
         }
+
         fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), old_rand_core::Error> {
             Ok(RngCore::try_fill_bytes(&mut self.0, dest).unwrap())
         }
@@ -249,14 +256,13 @@ mod test {
     }
 
     #[test]
+    #[rustfmt::skip]
     fn serialization() {
         use ed25519_dalek::Signer;
         let mut rng = TestRng::seed_from_u64(0);
         let keypair = ed25519_dalek::Keypair::generate(&mut rng);
         let signature = keypair.sign(b"hello");
-        let signature0 = Signature {
-            signature: signature,
-        };
+        let signature0 = Signature { signature };
         let s = serde_json::to_string(&signature0).unwrap();
         assert_eq!(s, "{\"signature\":\"6a8405500e2773d2c2c17edfec2f94d9200927f91e8db37d61244e8a5a9bd347e2935183a07e8f38dceef2b0663462ab2d9c1db402eac777c5abdbed29ba2d0f\"}");
         let signature1: Signature = serde_json::from_str(&s).unwrap();
