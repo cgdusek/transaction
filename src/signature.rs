@@ -2,6 +2,10 @@
 
 use std::fmt;
 
+// we may wrap these reexports later
+pub use ed25519_dalek::{Digest, Sha512};
+use old_rand_core::{CryptoRng as OldCryptoRng, RngCore as OldRngCore};
+use rand::{CryptoRng, RngCore};
 use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy)]
@@ -12,6 +16,8 @@ pub enum Error {
     InvalidConsts,
     /// String length was wrong
     InvalidLen,
+    SignError,
+    VerifyError,
 }
 
 impl fmt::Display for Error {
@@ -181,17 +187,17 @@ fn to_hex_string_fast<const N: usize, const N2: usize>(src: &[u8]) -> Result<Str
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
-    //#[serde(deserialize_with = "de_signature")]
-    pub signature: ed25519_dalek::Signature,
+    signature: ed25519_dalek::Signature,
 }
-
-impl Signature {}
 
 impl Serialize for Signature {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
+        // we are including the field names, because we are using `serde` impls for
+        // debugging purposes and we do not want to mix up the different kinds of keys
+        // and signatures
         let mut s = serializer.serialize_struct("Signature", 1)?;
         s.serialize_field(
             "signature",
@@ -211,7 +217,7 @@ impl<'de> Deserialize<'de> for Signature {
             signature: String,
         }
         let tmp = Signature::deserialize(deserializer)?;
-        let array: [u64; 8] =
+        let array =
             from_hex_str_fast::<8, 16>(tmp.signature.as_bytes()).map_err(de::Error::custom)?;
         let signature = ed25519_dalek::Signature::from_bytes(bytemuck::bytes_of(&array))
             .map_err(de::Error::custom)?;
@@ -219,9 +225,186 @@ impl<'de> Deserialize<'de> for Signature {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicKey {
+    public_key: ed25519_dalek::PublicKey,
+}
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("PublicKey", 1)?;
+        s.serialize_field(
+            "public_key",
+            &to_hex_string_fast::<4, 8>(&self.public_key.to_bytes()).unwrap(),
+        )?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PublicKey {
+            public_key: String,
+        }
+        let tmp = PublicKey::deserialize(deserializer)?;
+        let array =
+            from_hex_str_fast::<4, 8>(tmp.public_key.as_bytes()).map_err(de::Error::custom)?;
+        let public_key = ed25519_dalek::PublicKey::from_bytes(bytemuck::bytes_of(&array))
+            .map_err(de::Error::custom)?;
+        Ok(Self { public_key })
+    }
+}
+
+impl PublicKey {
+    pub fn verify(&self, msg: &[u8], signature: &Signature) -> Result<(), Error> {
+        use ed25519_dalek::Verifier;
+        self.public_key
+            .verify(msg, &signature.signature)
+            .map_err(|_| VerifyError)
+    }
+
+    pub fn verify_prehashed(
+        &self,
+        prehash: Sha512,
+        context: Option<&[u8]>,
+        signature: &Signature,
+    ) -> Result<(), Error> {
+        self.public_key
+            .verify_prehashed(prehash, context, &signature.signature)
+            .map_err(|_| VerifyError)
+    }
+}
+
+#[derive(Debug)]
+pub struct SecretKey {
+    secret_key: ed25519_dalek::SecretKey,
+}
+
+impl Clone for SecretKey {
+    fn clone(&self) -> Self {
+        Self {
+            secret_key: ed25519_dalek::SecretKey::from_bytes(&self.secret_key.to_bytes()).unwrap(),
+        }
+    }
+}
+
+impl PartialEq for SecretKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.secret_key.to_bytes() == other.secret_key.to_bytes()
+    }
+}
+
+impl Eq for SecretKey {}
+
+impl Serialize for SecretKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut s = serializer.serialize_struct("SecretKey", 1)?;
+        s.serialize_field(
+            "secret_key",
+            &to_hex_string_fast::<4, 8>(&self.secret_key.to_bytes()).unwrap(),
+        )?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SecretKey {
+            secret_key: String,
+        }
+        let tmp = SecretKey::deserialize(deserializer)?;
+        let array =
+            from_hex_str_fast::<4, 8>(tmp.secret_key.as_bytes()).map_err(de::Error::custom)?;
+        let secret_key = ed25519_dalek::SecretKey::from_bytes(bytemuck::bytes_of(&array))
+            .map_err(de::Error::custom)?;
+        Ok(Self { secret_key })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Keypair {
+    pub public: PublicKey,
+    pub secret: SecretKey,
+}
+
+impl Keypair {
+    pub fn generate<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
+        // the old interface and functionality is unchanged, the version bumps of `rand`
+        // have fixed other things
+        struct Rng<R>(R);
+        impl<R> OldCryptoRng for Rng<R> {}
+        impl<R: RngCore> OldRngCore for Rng<R> {
+            fn next_u32(&mut self) -> u32 {
+                RngCore::next_u32(&mut self.0)
+            }
+
+            fn next_u64(&mut self) -> u64 {
+                RngCore::next_u64(&mut self.0)
+            }
+
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                RngCore::fill_bytes(&mut self.0, dest)
+            }
+
+            fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), old_rand_core::Error> {
+                RngCore::try_fill_bytes(&mut self.0, dest).unwrap();
+                Ok(())
+            }
+        }
+        let tmp = ed25519_dalek::Keypair::generate(&mut Rng(rng));
+        Self {
+            public: PublicKey {
+                public_key: tmp.public,
+            },
+            secret: SecretKey {
+                secret_key: tmp.secret,
+            },
+        }
+    }
+
+    pub fn generate_with_osrng() -> Self {
+        let mut csprng = rand::rngs::OsRng {};
+        Self::generate(&mut csprng)
+    }
+
+    pub fn sign(&self, msg: &[u8]) -> Signature {
+        // from the source of `ed25519_dalek`'s Verifier. We aren't using the
+        // `signature` crate's traits because of dependency problems it has
+        let expanded: ed25519_dalek::ExpandedSecretKey = (&self.secret.secret_key).into();
+        let signature = expanded.sign(msg, &self.public.public_key);
+        Signature { signature }
+    }
+
+    pub fn sign_prehashed(
+        &self,
+        prehash: Sha512,
+        context: Option<&[u8]>,
+    ) -> Result<Signature, Error> {
+        let expanded: ed25519_dalek::ExpandedSecretKey = (&self.secret.secret_key).into();
+        Ok(Signature {
+            signature: expanded
+                .sign_prehashed(prehash, &self.public.public_key, context)
+                .map_err(|_| SignError)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use old_rand_core::{CryptoRng as OldCryptoRng, RngCore as OldRngCore};
     use rand_xoshiro::{
         rand_core::{RngCore, SeedableRng},
         Xoshiro128StarStar,
@@ -229,10 +412,10 @@ mod test {
 
     use super::*;
 
-    /// Use only for deterministic testing not for production
+    /// Use only for deterministic testing, not for production
     struct TestRng(Xoshiro128StarStar);
-    impl OldCryptoRng for TestRng {}
-    impl OldRngCore for TestRng {
+    impl CryptoRng for TestRng {}
+    impl RngCore for TestRng {
         fn next_u32(&mut self) -> u32 {
             RngCore::next_u32(&mut self.0)
         }
@@ -245,7 +428,7 @@ mod test {
             RngCore::fill_bytes(&mut self.0, dest)
         }
 
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), old_rand_core::Error> {
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
             Ok(RngCore::try_fill_bytes(&mut self.0, dest).unwrap())
         }
     }
@@ -257,15 +440,55 @@ mod test {
 
     #[test]
     #[rustfmt::skip]
-    fn serialization() {
-        use ed25519_dalek::Signer;
+    fn serde_signature() {
         let mut rng = TestRng::seed_from_u64(0);
-        let keypair = ed25519_dalek::Keypair::generate(&mut rng);
-        let signature = keypair.sign(b"hello");
-        let signature0 = Signature { signature };
+        let keypair = Keypair::generate(&mut rng);
+        let signature0 = keypair.sign(b"hello");
         let s = serde_json::to_string(&signature0).unwrap();
         assert_eq!(s, "{\"signature\":\"6a8405500e2773d2c2c17edfec2f94d9200927f91e8db37d61244e8a5a9bd347e2935183a07e8f38dceef2b0663462ab2d9c1db402eac777c5abdbed29ba2d0f\"}");
         let signature1: Signature = serde_json::from_str(&s).unwrap();
         assert_eq!(signature0, signature1);
+    }
+
+    #[test]
+    fn serde_public_key() {
+        let mut rng = TestRng::seed_from_u64(0);
+        let public_key0 = Keypair::generate(&mut rng).public;
+        let s = serde_json::to_string(&public_key0).unwrap();
+        assert_eq!(
+            s,
+            "{\"public_key\":\"d66e3e429d2daab6fee5bdf9f450b4e56b488d2fdf4f70ec39a811701763e4ec\"}"
+        );
+        let public_key1: PublicKey = serde_json::from_str(&s).unwrap();
+        assert_eq!(public_key0, public_key1);
+    }
+
+    #[test]
+    fn serde_private_key() {
+        let mut rng = TestRng::seed_from_u64(0);
+        let private_key0 = Keypair::generate(&mut rng).secret;
+        let s = serde_json::to_string(&private_key0).unwrap();
+        assert_eq!(
+            s,
+            "{\"secret_key\":\"5d04c9de759d089a62d377ab0564e1c3daa8955c56a0de6040515ac2140629a4\"}"
+        );
+        let private_key1: SecretKey = serde_json::from_str(&s).unwrap();
+        assert_eq!(private_key0, private_key1);
+    }
+
+    #[test]
+    fn sign_and_verify() {
+        let mut rng = TestRng::seed_from_u64(0);
+        let keypair = Keypair::generate(&mut rng);
+        let signature = keypair.sign(b"hello world");
+        keypair.public.verify(b"hello world", &signature).unwrap();
+        keypair
+            .public
+            .verify(b"hello world 2", &signature)
+            .unwrap_err();
+        keypair
+            .public
+            .verify(b"hello world", &keypair.sign(b"hello world 2"))
+            .unwrap_err();
     }
 }
